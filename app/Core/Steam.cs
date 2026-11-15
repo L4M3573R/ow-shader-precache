@@ -170,6 +170,21 @@ public static class Steam {
         return null;
     }
 
+    /// <summary>Identifies the DXVK build inside a Proton: a different DXVK
+    /// generates different shader code, so compiled shaders don't carry over.</summary>
+    public static string DxvkId(ProtonInfo proton) {
+        foreach (var rel in new[] { "files/lib/wine/dxvk/x86_64-windows/d3d11.dll", "files/lib64/wine/dxvk/d3d11.dll",
+                                    "dist/lib64/wine/dxvk/d3d11.dll", "files/lib/wine/dxvk/d3d11.dll" }) {
+            var p = Path.Combine(proton.Dir, rel);
+            if (File.Exists(p)) {
+                var fi = new FileInfo(p);
+                return $"{fi.Length}:{fi.LastWriteTimeUtc.Ticks}";
+            }
+        }
+        var ver = Path.Combine(proton.Dir, "version");
+        return File.Exists(ver) ? File.ReadAllText(ver).Trim() : proton.Dir;
+    }
+
     public static string? Fossilize(GameInstall g) {
         var p = Path.Combine(g.SteamRoot, "ubuntu12_64", "fossilize_replay");
         return File.Exists(p) ? p : null;

@@ -10,9 +10,15 @@ namespace OwShaderPrecache.Core;
 /// <summary>Extracts every ShaderCode asset (type 0x087, gzip-compressed
 /// DXBC) from the Overwatch Steam install.</summary>
 public static class ShaderExtractor {
-    public sealed record Result(int Extracted, int Failed, long Bytes, string Version);
+    /// <param name="Unique">distinct shaders in the game</param>
+    /// <param name="NewHashes">shaders not compiled yet (only these were written to disk)</param>
+    public sealed record Result(int Unique, int Failed, List<ulong> NewHashes, long NewBytes, string Version);
 
-    public static Result Extract(string gameDir, string outDir, Action<int, int> progress, CancellationToken ct) {
+    /// <summary>Reads every shader, but writes out only those for which
+    /// <paramref name="alreadyDone"/> is false. Files are named by content hash,
+    /// so identical shaders stored under several asset IDs are compiled once.</summary>
+    public static Result Extract(string gameDir, string outDir, Func<ulong, bool> alreadyDone,
+                                 Action<int, int> progress, CancellationToken ct) {
         if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
         Directory.CreateDirectory(outDir);
 
@@ -44,6 +50,8 @@ public static class ShaderExtractor {
         var guids = tank.m_assets.Keys.Where(g => teResourceGUID.Type(g) == 0x087).ToList();
         int done = 0, failed = 0;
         long bytes = 0;
+        var seen = new System.Collections.Concurrent.ConcurrentDictionary<ulong, bool>();
+        var fresh = new System.Collections.Concurrent.ConcurrentBag<ulong>();
         progress(0, guids.Count);
         Parallel.ForEach(guids, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = ct }, guid => {
             try {
@@ -53,8 +61,12 @@ public static class ShaderExtractor {
                 stream.CopyTo(ms);
                 var dxbc = FindDxbc(ms.ToArray());
                 if (dxbc == null) { Interlocked.Increment(ref failed); return; }
-                File.WriteAllBytes(Path.Combine(outDir, $"{guid:X16}.{Kind(dxbc)}.dxbc"), dxbc);
-                Interlocked.Add(ref bytes, dxbc.Length);
+                var h = Manifest.Hash(dxbc);
+                if (seen.TryAdd(h, true) && !alreadyDone(h)) {
+                    File.WriteAllBytes(Path.Combine(outDir, $"{h:X16}.{Kind(dxbc)}.dxbc"), dxbc);
+                    fresh.Add(h);
+                    Interlocked.Add(ref bytes, dxbc.Length);
+                }
             } catch (OperationCanceledException) {
                 throw;
             } catch {
@@ -64,7 +76,7 @@ public static class ShaderExtractor {
             if (d % 2000 == 0) progress(d, guids.Count);
         });
         progress(guids.Count, guids.Count);
-        return new Result(done - failed, failed, bytes, version ?? "?");
+        return new Result(seen.Count, failed, fresh.ToList(), bytes, version ?? "?");
     }
 
     static Exception Unwrap(Exception e) {

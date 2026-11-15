@@ -22,6 +22,9 @@ the compiled result in the shader cache the game loads at launch.
 7. Start Steam and play.
 
 Run it again after every Overwatch patch or graphics driver update. The app tells you when the cache is out of date.
+Later runs only compile what's new. The app remembers every shader and pipeline it has already compiled (for your
+driver and Proton), so after a patch it compiles just the added or changed shaders, usually in a few minutes. After a
+new graphics driver or a different Proton, everything has to be compiled again, and the app does that automatically.
 
 ### Requirements
 
@@ -61,6 +64,11 @@ uses Mesa mode.
 4. **Optional: Steam recordings.** Replays the pipelines Steam recorded (your sessions plus Valve's
    community database) with Steam's own `fossilize_replay`. Everything already installed is attached
    read-only, so only missing pipelines are compiled, into separate `shader_precache_rN` files.
+5. **Only what's left.** Shaders are fingerprinted by content, and recorded pipelines by their Fossilize
+   hash. Per driver + DXVK combination, the app keeps a list of what's done
+   (`~/.config/ow-shader-precache/compiled/`). Each run extracts and replays only the rest, into the next
+   cache file (`shader_precache_g1…g8`, `shader_precache_r1…r4`), so existing files are never rebuilt. When all
+   slots are used, the files are combined in one full rebuild.
 
 ### Does it really match what the game compiles?
 

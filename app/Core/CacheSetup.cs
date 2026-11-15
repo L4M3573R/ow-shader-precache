@@ -13,7 +13,9 @@ namespace OwShaderPrecache.Core;
 /// Mesa: the cache is shared between processes, so we compile straight into
 /// the directory Steam gives the game.</summary>
 public static class CacheSetup {
-    public const string ExtractName = "shader_precache";                // game-files cache
+    public const string ExtractName = "shader_precache";                // game-files cache (first run)
+    public const string GamePrefix = "shader_precache_g";               // later game-file additions g1..g8
+    public const int GameSlots = 8;
     public const string ReplayPrefix = "shader_precache_r";             // replay caches r1..r4
     public const int ReplaySlots = 4;
     public const string WorkSuffix = "_work";
@@ -24,9 +26,25 @@ public static class CacheSetup {
     public static IEnumerable<string> ReplayNames() =>
         Enumerable.Range(1, ReplaySlots).Select(i => $"{ReplayPrefix}{i}");
 
+    /// <summary>Game-file caches: the first full compile, then one file per
+    /// later run that found new shaders (e.g. after a patch).</summary>
+    public static IEnumerable<string> GameNames() =>
+        Enumerable.Range(1, GameSlots).Select(i => $"{GamePrefix}{i}").Prepend(ExtractName);
+
+    public static IEnumerable<string> OurNames() => GameNames().Concat(ReplayNames());
+
+    /// <summary>Steam's caches plus every cache this app installed and that exists now.</summary>
+    public static List<string> Installed(GameInstall g) =>
+        SteamReadOnly.Concat(OurNames().Where(n => Exists(g, n))).ToList();
+
     /// <summary>Everything the game should load read-only (missing files are ignored by the driver).</summary>
     public static string GameReadOnlyList() =>
-        string.Join(";", SteamReadOnly.Append(ExtractName).Concat(ReplayNames()));
+        string.Join(";", SteamReadOnly.Concat(OurNames()));
+
+    /// <summary>Remove every cache this app installed (driver/Proton changed, or a full rebuild).</summary>
+    public static void DeleteAll(GameInstall g, IEnumerable<string> names) {
+        foreach (var n in names) Delete(g, n);
+    }
 
     public static long CacheBytes(int gib) => (long)gib * 1024 * 1024 * 1024;
 

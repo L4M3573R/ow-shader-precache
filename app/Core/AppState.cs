@@ -11,6 +11,8 @@ public sealed class AppState {
     public int ShadersCompiled { get; set; }
     public DateTime? ReplayedAt { get; set; }
     public string? GameDir { get; set; }
+    /// <summary>Driver + DXVK combination the installed caches were built for.</summary>
+    public string? CacheKey { get; set; }
 
     public static string ConfigDir => Path.Combine(
         Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") is { Length: > 0 } x ? x

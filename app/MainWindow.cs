@@ -278,6 +278,7 @@ public sealed class MainWindow : Window {
         var proton = protonBox.SelectedItem as Steam.ProtonInfo
                      ?? throw new InvalidOperationException("No Proton found. Install one in Steam (e.g. Proton Experimental).");
         bool replay = replayBox.IsChecked == true, keep = keepBox.IsChecked == true, force = forceBox.IsChecked == true;
+        Directory.CreateDirectory(AppState.CacheDir);
         File.WriteAllText(logPath, "");
         Log($"Overwatch: {g.GameDir}");
         Log($"GPU cache: {Gpu.Label(mode)} · Proton: {proton.Name} · limit {gib} GB");
@@ -286,30 +287,62 @@ public sealed class MainWindow : Window {
             if (Steam.GameRunning()) throw new InvalidOperationException("Overwatch is running. Close it first.");
             var build = Steam.GameBuild(g.GameDir);
             var drv = Gpu.DriverId(mode);
-            bool upToDate = !force && state.GameBuild == build && state.DriverId == drv && state.Mode == mode.ToString() &&
-                            (mode != CacheMode.NvidiaProprietary || CacheSetup.Exists(g, CacheSetup.ExtractName));
+            var key = Manifest.Key(mode, drv, Steam.DxvkId(proton));
+            var shaders = Manifest.Load(key, "shaders");
+            var pipes = Manifest.Load(key, "pipelines");
+            bool nvidia = mode == CacheMode.NvidiaProprietary;
             int steps = replay ? 3 : 2;
 
-            if (upToDate) {
-                Log("Game shaders are already compiled for this game build and driver - skipping.");
+            // What has already been compiled? Anything built for a different
+            // driver or DXVK is unusable, so then start fresh.
+            if (force) {
+                Log("Full rebuild requested: discarding earlier results.");
+                shaders.Clear(); pipes.Clear();
+                if (nvidia) CacheSetup.DeleteAll(g, CacheSetup.OurNames());
+            } else if (state.CacheKey != null && state.CacheKey != key) {
+                Log("The graphics driver or Proton changed since the last run; earlier compiled shaders " +
+                    "can't be used with it. Starting fresh.");
+                shaders.Clear(); pipes.Clear();
+                if (nvidia) CacheSetup.DeleteAll(g, CacheSetup.OurNames());
+            }
+            state.CacheKey = key;
+            state.Mode = mode.ToString();
+            state.DriverId = drv;
+
+            // NVIDIA: new shaders go into the next free cache file. If all are
+            // used (many patches later), merge everything into one fresh file.
+            string? target = null;
+            if (nvidia) {
+                target = CacheSetup.GameNames().FirstOrDefault(n => !CacheSetup.Exists(g, n));
+                if (target == null) {
+                    Log("Combining the game-file caches from earlier runs into one (one-time full compile).");
+                    CacheSetup.DeleteAll(g, CacheSetup.GameNames());
+                    shaders.Clear();
+                    target = CacheSetup.ExtractName;
+                }
+            }
+
+            var shaderDir = Path.Combine(AppState.CacheDir, "shaders");
+            Step($"Step 1/{steps}: checking the game's shaders…");
+            Log(shaders.Count > 0
+                ? $"Checking the game files for shaders not compiled yet ({shaders.Count:N0} already done)…"
+                : "Reading all shaders from the game files…");
+            var ex = ShaderExtractor.Extract(g.GameDir, shaderDir, shaders.Contains,
+                (d, t) => Step($"Step 1/{steps}: checking shaders ({d:N0} / {t:N0})", t == 0 ? 0 : (double)d / t), ct);
+            Log($"{ex.Unique:N0} shaders in the game ({ex.Version}); {ex.NewHashes.Count:N0} still to compile" +
+                (ex.Failed > 0 ? $"; {ex.Failed} unreadable." : "."));
+            state.GameBuild = build;
+
+            if (ex.NewHashes.Count == 0) {
+                Log("Every game shader is already compiled - nothing to do for this step.");
             } else {
-                var shaderDir = Path.Combine(AppState.CacheDir, "shaders");
-                var need = 6L * 1024 * 1024 * 1024;
-                var free = new DriveInfo(g.ShaderCacheDir.Length > 0 ? Path.GetPathRoot(g.ShaderCacheDir)! : "/").AvailableFreeSpace;
-                if (free < need) Log($"Warning: only {free / 1073741824.0:F1} GB free near the shader cache.");
-
-                Step($"Step 1/{steps}: reading shaders from the game files…");
-                Log("Extracting shaders from the game files…");
-                var ex = ShaderExtractor.Extract(g.GameDir, shaderDir,
-                    (d, t) => Step($"Step 1/{steps}: extracting shaders ({d:N0} / {t:N0})", t == 0 ? 0 : (double)d / t), ct);
-                Log($"Extracted {ex.Extracted:N0} shaders ({ex.Bytes / 1048576.0:N0} MB) from {ex.Version}; {ex.Failed} failed.");
-
-                Step($"Step 2/{steps}: compiling (first run sets up a Wine prefix)…");
-                Log($"Compiling through DXVK with {proton.Name}. This takes a while; the PC will be busy.");
+                Step($"Step 2/{steps}: compiling {ex.NewHashes.Count:N0} shaders (first run sets up a Wine prefix)…");
+                Log($"Compiling through DXVK with {proton.Name}. The PC will be busy for a while.");
                 var helper = ShaderCompiler.ExtractHelper(Path.Combine(AppState.CacheDir, "bin"));
-                var work = CacheSetup.ExtractName + CacheSetup.WorkSuffix;
-                if (mode == CacheMode.NvidiaProprietary) CacheSetup.DeleteWork(g, work);
-                var env = CacheSetup.Env(g, mode, gib, work, Array.Empty<string>());
+                var work = (target ?? CacheSetup.ExtractName) + CacheSetup.WorkSuffix;
+                if (nvidia) CacheSetup.DeleteWork(g, work);
+                // Already-installed caches are attached read-only, so nothing is compiled twice.
+                var env = CacheSetup.Env(g, mode, gib, work, nvidia ? CacheSetup.Installed(g) : new List<string>());
                 var started = DateTime.Now;
                 var res = ShaderCompiler.Run(g, proton, helper, Path.Combine(AppState.CacheDir, "prefix"), shaderDir, env,
                     (d, t) => {
@@ -321,33 +354,37 @@ public sealed class MainWindow : Window {
                     }, Log, ct);
                 Log($"Compiled {res.Compiled:N0} shaders in {Fmt(res.Elapsed)} ({res.Failed} failed).");
 
-                if (mode == CacheMode.NvidiaProprietary) {
-                    var fin = CacheSetup.Finalize(g, work, CacheSetup.ExtractName)
-                              ?? throw new InvalidOperationException("The driver didn't write a shader cache. Is the NVIDIA driver selected correctly?");
-                    Log($"Installed {fin.size / 1048576.0:N0} MB cache: {fin.path}");
+                if (nvidia) {
+                    var fin = CacheSetup.Finalize(g, work, target!);
+                    if (fin == null || fin.Value.size < 4096) {
+                        // everything was already in an installed cache
+                        if (fin != null) CacheSetup.Delete(g, target!);
+                        Log("No new compiled code was needed - it was all installed already.");
+                    } else {
+                        Log($"Installed {fin.Value.size / 1048576.0:N0} MB cache: {fin.Value.path}");
+                    }
                 }
-                state.GameBuild = build;
-                state.DriverId = drv;
-                state.Mode = mode.ToString();
-                state.CompiledAt = DateTime.Now;
-                state.ShadersCompiled = res.Compiled;
-                state.Save();
-                if (!keep) {
-                    try { Directory.Delete(shaderDir, true); } catch { }
-                }
+                shaders.AddRange(ex.NewHashes);
+                shaders.Save();
+            }
+            state.CompiledAt = DateTime.Now;
+            state.ShadersCompiled = shaders.Count;
+            state.Save();
+            if (!keep) {
+                try { Directory.Delete(shaderDir, true); } catch { }
             }
 
-            if (replay) ReplayStep(g, mode, gib, steps, ct);
+            if (replay) ReplayStep(g, mode, gib, steps, pipes, ct);
 
             Step("Done", 1);
             Log("Done.");
             var lo = LaunchOptions.Current(g.SteamRoot) ?? "";
-            if (!lo.Contains(mode == CacheMode.NvidiaProprietary ? CacheSetup.GameReadOnlyList() : "MESA_SHADER_CACHE_MAX_SIZE"))
+            if (!lo.Contains(nvidia ? CacheSetup.GameReadOnlyList() : "MESA_SHADER_CACHE_MAX_SIZE"))
                 Log("NEXT: exit Steam completely, then click \"Write Steam launch options\" so the game uses the cache.");
         }, ct);
     }
 
-    void ReplayStep(GameInstall g, CacheMode mode, int gib, int steps, CancellationToken ct) {
+    void ReplayStep(GameInstall g, CacheMode mode, int gib, int steps, Manifest pipes, CancellationToken ct) {
         var fossilize = Steam.Fossilize(g);
         var dbs = FozSet.ForDxvk(g);
         if (fossilize == null || !dbs.All.Any()) {
@@ -355,44 +392,63 @@ public sealed class MainWindow : Window {
                 "Shader Pre-Caching and play once). Skipping that step.");
             return;
         }
-        Step($"Step {steps}/{steps}: compiling Steam's recorded pipelines…");
-        Log($"Replaying Steam's recordings: {dbs.Local.Count} from your sessions, {dbs.Community.Count} community database(s).");
-        Dictionary<string, string> env;
-        string? slot = null, work = null;
-        if (mode == CacheMode.NvidiaProprietary) {
-            var used = CacheSetup.ReplayNames().Where(n => CacheSetup.Exists(g, n)).ToList();
-            slot = CacheSetup.ReplayNames().FirstOrDefault(n => !used.Contains(n));
+        bool nvidia = mode == CacheMode.NvidiaProprietary;
+        string? slot = null;
+        if (nvidia) {
+            slot = CacheSetup.ReplayNames().FirstOrDefault(n => !CacheSetup.Exists(g, n));
             if (slot == null) {
-                // all slots used: consolidate into one fresh cache
-                foreach (var n in used) CacheSetup.Delete(g, n);
-                used.Clear();
+                Log("Combining the replay caches from earlier runs into one (one-time full replay).");
+                CacheSetup.DeleteAll(g, CacheSetup.ReplayNames());
+                pipes.Clear();
                 slot = CacheSetup.ReplayNames().First();
-                Log("Consolidating earlier replay caches into one.");
             }
-            work = slot + CacheSetup.WorkSuffix;
-            CacheSetup.DeleteWork(g, work);
-            var installed = new[] { "steam_shader_cache", "steamapp_merged_shader_cache", CacheSetup.ExtractName }.Concat(used);
-            env = CacheSetup.Env(g, mode, gib, work, installed);
-        } else {
-            env = CacheSetup.Env(g, mode, gib, "", Array.Empty<string>());
         }
-        var started = DateTime.Now;
-        var r = Replayer.Run(fossilize, dbs, env, (d, t) => {
-            var frac = t == 0 ? 1 : (double)d / t;
-            var el = DateTime.Now - started;
-            var eta = frac > 0.02 && frac < 1 ? TimeSpan.FromSeconds(el.TotalSeconds / frac - el.TotalSeconds) : (TimeSpan?)null;
-            Step($"Step {steps}/{steps}: recorded pipelines ({d:N0} / {t:N0})" + (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
-        }, Log, ct);
-        Log($"Checked {r.Total:N0} recorded pipelines in {Fmt(r.Elapsed)}; already-installed ones were skipped." +
-            (r.FailedChunks > 0 ? $" {r.FailedChunks} chunk(s) failed." : ""));
-        if (slot != null && work != null) {
-            var fin = CacheSetup.Finalize(g, work, slot);
-            Log(fin == null || fin.Value.size < 4096
-                ? "Nothing new needed compiling - everything was already installed."
-                : $"Installed {fin.Value.size / 1048576.0:N0} MB of new pipelines: {fin.Value.path}");
-            if (fin is { size: < 4096 }) CacheSetup.Delete(g, slot);
+
+        Step($"Step {steps}/{steps}: finding recorded pipelines not compiled yet…");
+        Log($"Steam recordings: {dbs.Local.Count} from your sessions, {dbs.Community.Count} community database(s)" +
+            (pipes.Count > 0 ? $"; {pipes.Count:N0} pipelines already done." : "."));
+        var tmp = Path.Combine(AppState.CacheDir, "replay-todo.foz");
+        var plan = Replayer.BuildIncremental(dbs, pipes, tmp, Log, ct);
+        if (plan.FozPath == null) {
+            Log($"All {plan.TotalRecorded:N0} recorded pipelines are already done - nothing to do for this step.");
+            return;
         }
-        state.ReplayedAt = DateTime.Now;
+        try {
+            Log($"{plan.TotalRecorded:N0} recorded pipelines; {plan.NewPipelines.Count:N0} not done yet.");
+            Dictionary<string, string> env;
+            string? work = null;
+            if (nvidia) {
+                work = slot + CacheSetup.WorkSuffix;
+                CacheSetup.DeleteWork(g, work);
+                // everything already installed is read-only: the driver skips it
+                env = CacheSetup.Env(g, mode, gib, work, CacheSetup.Installed(g));
+            } else {
+                env = CacheSetup.Env(g, mode, gib, "", Array.Empty<string>());
+            }
+            var started = DateTime.Now;
+            var r = Replayer.Run(fossilize, new List<string> { plan.FozPath }, env, (d, t) => {
+                var frac = t == 0 ? 1 : (double)d / t;
+                var el = DateTime.Now - started;
+                var eta = frac > 0.02 && frac < 1 ? TimeSpan.FromSeconds(el.TotalSeconds / frac - el.TotalSeconds) : (TimeSpan?)null;
+                Step($"Step {steps}/{steps}: recorded pipelines ({d:N0} / {t:N0})" + (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
+            }, Log, ct);
+            Log($"Replayed {r.Replayed:N0} pipelines in {Fmt(r.Elapsed)}." +
+                (r.FailedChunks > 0 ? $" {r.FailedChunks} chunk(s) failed." : ""));
+            if (nvidia && work != null && slot != null) {
+                var fin = CacheSetup.Finalize(g, work, slot);
+                if (fin == null || fin.Value.size < 4096) {
+                    if (fin != null) CacheSetup.Delete(g, slot);
+                    Log("No new compiled code was needed - it was all installed already.");
+                } else {
+                    Log($"Installed {fin.Value.size / 1048576.0:N0} MB of new pipelines: {fin.Value.path}");
+                }
+            }
+            pipes.AddRange(plan.NewPipelines);
+            pipes.Save();
+            state.ReplayedAt = DateTime.Now;
+        } finally {
+            try { File.Delete(tmp); } catch { }
+        }
     }
 
     async Task VerifyAsync(GameInstall g, CancellationToken ct) {

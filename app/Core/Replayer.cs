@@ -36,9 +36,99 @@ public static class Replayer {
         lock (sb) return (p.ExitCode, sb.ToString());
     }
 
-    public static Result Run(string fossilize, FozSet dbs, Dictionary<string, string> env,
-                             Action<int, int> progress, Action<string> log, CancellationToken ct) {
+    public sealed record Plan(string? FozPath, List<ulong> NewPipelines, int TotalRecorded);
+
+    /// <summary>Writes a reduced database holding only the recorded pipelines
+    /// not compiled yet, plus what they need (shader modules, parent pipeline
+    /// libraries, layouts). Returns FozPath = null when nothing is left to do.</summary>
+    public static Plan BuildIncremental(FozSet dbs, Manifest done, string outPath, Action<string> log, CancellationToken ct) {
         var files = dbs.All.ToList();
+        var streams = files.ToDictionary(f => f, f => new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16));
+        try {
+            // index every object by (tag, hash); first occurrence wins
+            var index = new Dictionary<(int, ulong), (string file, Foz.Entry e)>();
+            foreach (var f in files)
+                foreach (var e in Foz.Entries(f)) {
+                    ct.ThrowIfCancellationRequested();
+                    index.TryAdd((e.Tag, e.Hash), (f, e));
+                }
+            var pipelines = index.Keys.Where(k => k.Item1 is Foz.TagGraphics or Foz.TagCompute).ToList();
+            var fresh = pipelines.Where(k => !done.Contains(k.Item2)).ToList();
+            if (fresh.Count == 0) return new Plan(null, new List<ulong>(), pipelines.Count);
+
+            // resolve dependencies
+            var needPipes = new HashSet<(int, ulong)>(fresh);
+            var needModules = new HashSet<ulong>();
+            var queue = new Queue<(int, ulong)>(fresh);
+            while (queue.Count > 0) {
+                ct.ThrowIfCancellationRequested();
+                var k = queue.Dequeue();
+                if (!index.TryGetValue(k, out var loc)) continue;
+                try {
+                    using var doc = System.Text.Json.JsonDocument.Parse(ReadPayload(streams[loc.file], loc.e));
+                    var rootName = k.Item1 == Foz.TagGraphics ? "graphicsPipelines" : "computePipelines";
+                    foreach (var p in doc.RootElement.GetProperty(rootName).EnumerateObject()) {
+                        var v = p.Value;
+                        if (v.TryGetProperty("stages", out var stages) && stages.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            foreach (var st in stages.EnumerateArray()) AddModule(st);
+                        if (v.TryGetProperty("stage", out var cst)) AddModule(cst);
+                        if (v.TryGetProperty("pNext", out var pn) && pn.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            foreach (var n in pn.EnumerateArray())
+                                if (n.TryGetProperty("libraries", out var libs))
+                                    foreach (var l in libs.EnumerateArray()) {
+                                        var lk = (Foz.TagGraphics, Convert.ToUInt64(l.GetString(), 16));
+                                        if (needPipes.Add(lk)) queue.Enqueue(lk);
+                                    }
+                    }
+                } catch (System.Text.Json.JsonException) { }
+            }
+            void AddModule(System.Text.Json.JsonElement st) {
+                if (st.TryGetProperty("module", out var m) && m.GetString() is { } hex)
+                    needModules.Add(Convert.ToUInt64(hex, 16));
+            }
+
+            // write: small objects (app info, layouts, render passes, ...) + needed modules + pipelines
+            using var outFs = File.Create(outPath);
+            using (var first = new FileStream(files[0], FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                var head = new byte[16];
+                first.ReadExactly(head);
+                outFs.Write(head);
+            }
+            foreach (var (k, loc) in index) {
+                bool keep = k.Item1 switch {
+                    Foz.TagGraphics or Foz.TagCompute => needPipes.Contains(k),
+                    4 => needModules.Contains(k.Item2),
+                    9 => false, // ray tracing: not used by DXVK
+                    _ => true,
+                };
+                if (!keep) continue;
+                var fs = streams[loc.file];
+                var raw = new byte[56 + loc.e.Size];
+                fs.Seek(loc.e.Offset - 56, SeekOrigin.Begin);
+                fs.ReadExactly(raw);
+                outFs.Write(raw);
+            }
+            log($"Prepared {fresh.Count:N0} new pipelines (+{needPipes.Count - fresh.Count:N0} already-compiled parents, " +
+                $"{needModules.Count:N0} shader modules).");
+            return new Plan(outPath, fresh.Select(k => k.Item2).ToList(), pipelines.Count);
+        } finally {
+            foreach (var fs in streams.Values) fs.Dispose();
+        }
+    }
+
+    static byte[] ReadPayload(FileStream fs, Foz.Entry e) {
+        var data = new byte[e.Size];
+        fs.Seek(e.Offset, SeekOrigin.Begin);
+        fs.ReadExactly(data);
+        if (e.Flags != 2) return data;
+        using var z = new System.IO.Compression.ZLibStream(new MemoryStream(data), System.IO.Compression.CompressionMode.Decompress);
+        using var ms = new MemoryStream();
+        z.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    public static Result Run(string fossilize, List<string> files, Dictionary<string, string> env,
+                             Action<int, int> progress, Action<string> log, CancellationToken ct) {
         log($"Counting recorded pipelines in {files.Count} database(s)...");
         int total = Foz.Hashes(files, Foz.TagGraphics).Count;
         int computeTotal = Foz.Hashes(files, Foz.TagCompute).Count;
