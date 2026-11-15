@@ -365,14 +365,16 @@ public sealed class MainWindow : Window {
                 var started = DateTime.Now;
                 ShaderCompiler.Result res;
                 try {
-                res = ShaderCompiler.Run(g, proton, helper, Path.Combine(AppState.CacheDir, "prefix"), shaderDir, env,
-                    (d, t) => {
-                        var frac = t == 0 ? 0 : (double)d / t;
-                        var el = DateTime.Now - started;
-                        var eta = frac > 0.02 ? TimeSpan.FromSeconds(el.TotalSeconds / frac - el.TotalSeconds) : (TimeSpan?)null;
-                        Step($"Step 2/{steps}: compiling shaders ({d:N0} / {t:N0})" +
-                             (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
-                    }, Log, ct);
+                    res = ShaderCompiler.RunChunked(g, proton, helper, Path.Combine(AppState.CacheDir, "prefix"), shaderDir, env,
+                        8000,
+                        hashes => { shaders.AddRange(hashes); shaders.Save(); }, // remember each finished chunk at once
+                        (d, t) => {
+                            var frac = t == 0 ? 0 : (double)d / t;
+                            var el = DateTime.Now - started;
+                            var eta = frac > 0.02 ? TimeSpan.FromSeconds(el.TotalSeconds / frac - el.TotalSeconds) : (TimeSpan?)null;
+                            Step($"Step 2/{steps}: compiling shaders ({d:N0} / {t:N0})" +
+                                 (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
+                        }, Log, ct);
                 } catch {
                     // Keep what was compiled so far; the next run only does the rest.
                     if (nvidia && CacheSetup.RecoverLeftovers(g) is > 0 and var kept)
@@ -391,8 +393,6 @@ public sealed class MainWindow : Window {
                         Log($"Installed {fin.Value.size / 1048576.0:N0} MB cache: {fin.Value.path}");
                     }
                 }
-                shaders.AddRange(ex.NewHashes);
-                shaders.Save();
             }
             state.CompiledAt = DateTime.Now;
             state.ShadersCompiled = shaders.Count;
