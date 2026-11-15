@@ -11,7 +11,7 @@ the compiled result in the shader cache the game loads at launch.
 
 ## Download & run
 
-1. Download `ow-shader-precache` from the [latest release](../../releases/latest).
+1. Download `ow-shader-precache` from the [Releases page](../../releases).
 2. Make it executable: right-click → Properties → *Is executable*, or `chmod +x ow-shader-precache`.
 3. Run it (double-click, or `./ow-shader-precache`). Nothing else needs to be installed.
 4. Check that the Overwatch folder, graphics card and Proton were detected correctly.

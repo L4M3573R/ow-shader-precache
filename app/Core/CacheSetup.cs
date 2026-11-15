@@ -112,6 +112,25 @@ public static class CacheSetup {
             File.Delete(f);
     }
 
+    /// <summary>Keep work an interrupted run already compiled: turn leftover
+    /// work files into their (still free) cache slot. Returns MB recovered.</summary>
+    public static long RecoverLeftovers(GameInstall g) {
+        long recovered = 0;
+        foreach (var name in OurNames()) {
+            var work = name + WorkSuffix;
+            var root = Path.Combine(g.NvidiaCacheDir, "GLCache");
+            if (!Directory.Exists(root) ||
+                !Directory.EnumerateFiles(root, work + "*.bin", SearchOption.AllDirectories).Any()) continue;
+            if (Exists(g, name)) { DeleteWork(g, work); continue; }
+            var fin = Finalize(g, work, name);
+            if (fin is { } f) {
+                if (f.size < 4096) Delete(g, name);
+                else recovered += f.size;
+            }
+        }
+        return recovered / (1024 * 1024);
+    }
+
     /// <summary>Turn the biggest work fragment into the named read-only cache
     /// (smaller ones come from Wine helper processes and are discarded).</summary>
     public static (string path, long size)? Finalize(GameInstall g, string workName, string finalName) {

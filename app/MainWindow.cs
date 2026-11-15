@@ -39,6 +39,7 @@ public sealed class MainWindow : Window {
     GameInstall? game;
     AppState state = AppState.Load();
     CancellationTokenSource? cts;
+    bool closeWhenIdle;
     readonly string logPath = Path.Combine(AppState.CacheDir, "last-run.log");
 
     public MainWindow() {
@@ -112,17 +113,32 @@ public sealed class MainWindow : Window {
         }).IsChecked = true;
         if (vendors.Count > 1) Log($"Several GPUs found: {string.Join(", ", vendors.Select(Gpu.Label))}. Pick the one the game runs on.");
 
+        Closing += (_, e) => {
+            if (cts != null && !cts.IsCancellationRequested && cancelButton.IsEnabled) {
+                // stop the compiler (and its Wine processes) before closing
+                e.Cancel = true;
+                closeWhenIdle = true;
+                cts.Cancel();
+                Log("Stopping before closing…");
+            }
+        };
+        Closed += (_, _) => {
+            state.Save();
+            // Avalonia's D-Bus connection can throw while tearing down on Linux; nothing is left to do.
+            Environment.Exit(0);
+        };
+
         Opened += async (_, _) => {
             if (state.GameDir != null && Directory.Exists(state.GameDir)) UseGameDir(state.GameDir);
             else AutoDetect(false);
             // --auto: start precompiling right away (unattended runs / troubleshooting);
-            // --no-replay: skip the Steam-recordings step; --exit: close when finished.
+            // --no-replay: skip the Steam-recordings step; --verify: run the check against
+            // your play sessions; --exit: close when finished.
             var args = Environment.GetCommandLineArgs();
             if (args.Contains("--no-replay")) replayBox.IsChecked = false;
-            if (args.Contains("--auto")) {
-                await RunAsync(PrecompileAsync);
-                if (args.Contains("--exit")) Close();
-            }
+            if (args.Contains("--auto")) await RunAsync(PrecompileAsync);
+            if (args.Contains("--verify")) await RunAsync(VerifyAsync);
+            if (args.Contains("--exit") && (args.Contains("--auto") || args.Contains("--verify"))) Close();
         };
     }
 
@@ -261,6 +277,7 @@ public sealed class MainWindow : Window {
             SetBusy(false);
             state.Save();
             UpdateStatus();
+            if (closeWhenIdle) Close();
         }
     }
 
@@ -308,6 +325,8 @@ public sealed class MainWindow : Window {
             state.CacheKey = key;
             state.Mode = mode.ToString();
             state.DriverId = drv;
+            if (nvidia && CacheSetup.RecoverLeftovers(g) is > 0 and var mb)
+                Log($"Kept {mb:N0} MB compiled by an earlier, interrupted run; those shaders won't be compiled again.");
 
             // NVIDIA: new shaders go into the next free cache file. If all are
             // used (many patches later), merge everything into one fresh file.
@@ -344,7 +363,9 @@ public sealed class MainWindow : Window {
                 // Already-installed caches are attached read-only, so nothing is compiled twice.
                 var env = CacheSetup.Env(g, mode, gib, work, nvidia ? CacheSetup.Installed(g) : new List<string>());
                 var started = DateTime.Now;
-                var res = ShaderCompiler.Run(g, proton, helper, Path.Combine(AppState.CacheDir, "prefix"), shaderDir, env,
+                ShaderCompiler.Result res;
+                try {
+                res = ShaderCompiler.Run(g, proton, helper, Path.Combine(AppState.CacheDir, "prefix"), shaderDir, env,
                     (d, t) => {
                         var frac = t == 0 ? 0 : (double)d / t;
                         var el = DateTime.Now - started;
@@ -352,6 +373,12 @@ public sealed class MainWindow : Window {
                         Step($"Step 2/{steps}: compiling shaders ({d:N0} / {t:N0})" +
                              (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
                     }, Log, ct);
+                } catch {
+                    // Keep what was compiled so far; the next run only does the rest.
+                    if (nvidia && CacheSetup.RecoverLeftovers(g) is > 0 and var kept)
+                        Log($"Kept the {kept:N0} MB compiled so far. Run again to finish the rest.");
+                    throw;
+                }
                 Log($"Compiled {res.Compiled:N0} shaders in {Fmt(res.Elapsed)} ({res.Failed} failed).");
 
                 if (nvidia) {
@@ -426,12 +453,19 @@ public sealed class MainWindow : Window {
                 env = CacheSetup.Env(g, mode, gib, "", Array.Empty<string>());
             }
             var started = DateTime.Now;
-            var r = Replayer.Run(fossilize, new List<string> { plan.FozPath }, env, (d, t) => {
+            Replayer.Result r;
+            try {
+            r = Replayer.Run(fossilize, new List<string> { plan.FozPath }, env, (d, t) => {
                 var frac = t == 0 ? 1 : (double)d / t;
                 var el = DateTime.Now - started;
                 var eta = frac > 0.02 && frac < 1 ? TimeSpan.FromSeconds(el.TotalSeconds / frac - el.TotalSeconds) : (TimeSpan?)null;
                 Step($"Step {steps}/{steps}: recorded pipelines ({d:N0} / {t:N0})" + (eta != null ? $" · about {Fmt(eta.Value)} left" : ""), frac);
             }, Log, ct);
+            } catch {
+                if (nvidia && CacheSetup.RecoverLeftovers(g) is > 0 and var kept)
+                    Log($"Kept the {kept:N0} MB compiled so far. Run again to finish the rest.");
+                throw;
+            }
             Log($"Replayed {r.Replayed:N0} pipelines in {Fmt(r.Elapsed)}." +
                 (r.FailedChunks > 0 ? $" {r.FailedChunks} chunk(s) failed." : ""));
             if (nvidia && work != null && slot != null) {
