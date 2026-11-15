@@ -98,6 +98,12 @@ public static class ShaderCompiler {
                                     string shaderDir, Dictionary<string, string> cacheEnv, int chunkSize,
                                     Action<List<ulong>> chunkDone, Action<int, int> progress, Action<string> log,
                                     CancellationToken ct) {
+        // DXVK's own shader cache is disabled for these runs (DXVK_SHADER_CACHE=0);
+        // remove one left behind by older versions of this app (can be >1 GB).
+        try {
+            var stale = Path.Combine(prefixDir, "pfx", "drive_c", "users", "steamuser", "AppData", "Local", "dxvk");
+            if (Directory.Exists(stale)) Directory.Delete(stale, true);
+        } catch { }
         var files = Directory.GetFiles(shaderDir, "*.dxbc").OrderBy(f => f, StringComparer.Ordinal).ToList();
         int total = files.Count, done = 0, compiled = 0, failed = 0, skipped = 0;
         var sw = Stopwatch.StartNew();
