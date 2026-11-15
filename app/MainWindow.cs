@@ -112,9 +112,17 @@ public sealed class MainWindow : Window {
         }).IsChecked = true;
         if (vendors.Count > 1) Log($"Several GPUs found: {string.Join(", ", vendors.Select(Gpu.Label))}. Pick the one the game runs on.");
 
-        Opened += (_, _) => {
+        Opened += async (_, _) => {
             if (state.GameDir != null && Directory.Exists(state.GameDir)) UseGameDir(state.GameDir);
             else AutoDetect(false);
+            // --auto: start precompiling right away (unattended runs / troubleshooting);
+            // --no-replay: skip the Steam-recordings step; --exit: close when finished.
+            var args = Environment.GetCommandLineArgs();
+            if (args.Contains("--no-replay")) replayBox.IsChecked = false;
+            if (args.Contains("--auto")) {
+                await RunAsync(PrecompileAsync);
+                if (args.Contains("--exit")) Close();
+            }
         };
     }
 
