@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# match-test: measure how much of the game's real shader work is covered by
+# compiling the extracted DXBC shaders through DXVK.
+#
+#   1. compile extracted shaders with shadercompile.exe under the game's Proton
+#      into a scratch NVIDIA cache, then turn that into a read-only cache file
+#   2. replay pipelines Steam recorded from real Overwatch sessions twice:
+#        a) against an empty cache            -> baseline bytes compiled
+#        b) with our read-only cache attached -> bytes still compiled
+#   coverage = 1 - b/a   (share of the game's shader compile work we pre-did)
+#
+# Usage: match-test <extracted-shader-dir> [work-dir]
+set -euo pipefail
+
+SHADERS=$(realpath "$1")
+WORK=$(realpath -m "${2:-${XDG_CACHE_HOME:-$HOME/.cache}/shader-precache/match-test}")
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+EXE="$HERE/compiler/shadercompile.exe"
+STEAM=${STEAM_ROOT:-$HOME/.local/share/Steam}
+FR="$STEAM/ubuntu12_64/fossilize_replay"
+APPID=2357570
+# Steam library that has Overwatch installed
+LIB=${STEAM_LIBRARY:-$(grep -oP '"path"\s+"\K[^"]+' "$STEAM/steamapps/libraryfolders.vdf" | while read -r l; do
+        [ -f "$l/steamapps/appmanifest_$APPID.acf" ] && echo "$l"; done | head -1)}
+# Proton the game last ran with (its DXVK must be used)
+PROTON=${PROTON:-$(sed -n '2,$p' "$LIB/steamapps/compatdata/$APPID/config_info" | grep -oP '^.*(?=/files/)' | head -1)/proton}
+BUCKET=$(ls -d "$LIB"/steamapps/shadercache/$APPID/fozpipelinesv6/steamapprun_pipeline_cache.*/ | while read -r d; do
+           grep -q '"DXVK"' "$d/bucket.json" 2>/dev/null && echo "$d"; done | head -1)
+# Recordings from the newest local sessions (current DXVK version).
+NEWEST=$(ls -t "$BUCKET"/steamapprun_pipeline_cache.*.foz | head -1)
+PREFIX=$(basename "$NEWEST" | sed -E 's/\.[0-9]+\.foz$//')
+RECORDINGS=("$BUCKET"/"$PREFIX".*.foz)
+
+echo "shaders    : $SHADERS ($(ls "$SHADERS"/*.dxbc | wc -l) files)"
+echo "recordings : ${RECORDINGS[*]##*/}"
+echo "work dir   : $WORK"
+mkdir -p "$WORK/pfx"
+rm -rf "$WORK/cache" "$WORK/base" "$WORK/with"; mkdir -p "$WORK/cache"
+
+echo; echo "== 1. compiling extracted shaders through DXVK ($(basename "$(dirname "$PROTON")"))"
+WINPATH="Z:$(echo "$SHADERS" | tr / '\\')"
+t0=$(date +%s)
+env STEAM_COMPAT_DATA_PATH="$WORK/pfx" STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM" SteamAppId=0 \
+    __GL_SHADER_DISK_CACHE_PATH="$WORK/cache" __GL_SHADER_DISK_CACHE_APP_NAME=precache_work \
+    __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1 __GL_SHADER_DISK_CACHE_SIZE=$((64*1024**3)) \
+    "$PROTON" run "$EXE" "$WINPATH" >"$WORK/proton.log" 2>&1 || true
+grep -aE "^(device|done|[0-9]+ shader|D3D11)" "$SHADERS/shadercompile.log" || true; tail -2 "$SHADERS/shadercompile.log"
+echo "   took $(( $(date +%s) - t0 ))s"
+# The biggest fragment is ours (Wine helper processes write tiny ones).
+FRAG=$(find "$WORK/cache" -name 'precache_work*.bin' -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2)
+[ -n "$FRAG" ] || { echo "no cache produced"; exit 1; }
+DIR=$(dirname "$FRAG"); BASE=${FRAG%.bin}
+mv "$BASE.bin" "$DIR/shader_precache.bin"; mv "$BASE.toc" "$DIR/shader_precache.toc"
+echo "   cache: $(du -h "$DIR/shader_precache.bin" | cut -f1)"
+
+replay() { # $1 cache dir, $2 read-only list
+    env __GL_SHADER_DISK_CACHE_PATH="$1" __GL_SHADER_DISK_CACHE_APP_NAME=replay \
+        __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1 __GL_SHADER_DISK_CACHE_SIZE=$((64*1024**3)) \
+        __GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME="$2" \
+        "$FR" --num-threads "$(nproc)" "${RECORDINGS[@]}" 2>&1 | grep -E 'graphics pipelines:' | tail -1
+    find "$1" -name 'replay*.bin' -printf '%s\n' | awk '{s+=$1} END{print s+0}'
+}
+
+echo; echo "== 2a. baseline: replay real game recordings into an empty cache"
+mkdir -p "$WORK/base"
+OUT_A=$(replay "$WORK/base" "none"); echo "$OUT_A" | head -1
+A=$(echo "$OUT_A" | tail -1)
+
+echo; echo "== 2b. same replay with the precompiled cache attached (read-only)"
+cp -r "$WORK/cache" "$WORK/with"
+OUT_B=$(replay "$WORK/with" "shader_precache"); echo "$OUT_B" | head -1
+B=$(echo "$OUT_B" | tail -1)
+
+echo
+python3 -I -c "
+a,b=$A,$B
+print(f'baseline compiled : {a/1048576:8.1f} MB')
+print(f'still compiled    : {b/1048576:8.1f} MB')
+print(f'coverage          : {100*(1-b/a) if a else 0:8.1f} %  of the recorded game shader work was already in the precompiled cache')
+"

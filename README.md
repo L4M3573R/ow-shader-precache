@@ -1,0 +1,108 @@
+# Overwatch Shader Precompiler (Linux / Steam / Proton)
+
+Compiles **every shader in Overwatch** for your graphics card *before* you play, so you don't get
+stutter the first time a skin, map, hero or effect shows up.
+
+It reads the game's shaders straight from your Overwatch install (all ~150,000 of them, not just the
+ones someone happened to record), feeds them through the same DXVK + Proton the game uses, and leaves
+the compiled result in the shader cache the game loads at launch.
+
+![screenshot](docs/screenshot.png)
+
+## Download & run
+
+1. Download `ow-shader-precache` from the [latest release](../../releases/latest).
+2. Make it executable: right-click → Properties → *Is executable*, or `chmod +x ow-shader-precache`.
+3. Run it (double-click, or `./ow-shader-precache`). Nothing else needs to be installed.
+4. Check that the Overwatch folder, graphics card and Proton were detected correctly.
+5. Click **Precompile shaders** and wait. On a 16-thread CPU, the game files take about 15 minutes.
+   The optional Steam-recordings step adds more time.
+6. **Exit Steam completely** (tray icon → Exit), then click **Write Steam launch options**.
+   Without this step the game won't load the precompiled cache on NVIDIA.
+7. Start Steam and play.
+
+Run it again after every Overwatch patch or graphics driver update. The app tells you when the cache is out of date.
+
+### Requirements
+
+- Linux, x86-64, with the **Steam version** of Overwatch.
+- Overwatch launched at least once with Proton, so the app knows which Proton (and DXVK) to use.
+- Roughly 2 GB of temporary space for the extracted shaders, plus about 2-3 GB for the cache.
+- Works on regular distros and immutable ones (Bazzite, SteamOS desktop mode, Fedora Atomic). On
+  Gaming-Mode setups, switch to Desktop Mode to run it.
+
+### Graphics drivers
+
+| Driver | Status |
+|---|---|
+| NVIDIA proprietary driver | Tested (RTX 5070 Ti, driver 620.70) |
+| Mesa: AMD (RADV), Intel (ANV), NVIDIA open-source (NVK) | Implemented, not yet tested |
+
+The app detects the driver itself. For example, on an NVIDIA card without the proprietary driver it
+uses Mesa mode.
+
+## How it works
+
+1. **Extract.** Overwatch ships its DirectX 11 shaders as gzip-compressed DXBC inside its game
+   archives. The app reads the Steam install's archives with [TACTLib](https://github.com/overtools/TACTLib)
+   and pulls out every ShaderCode asset (type `0x087`).
+2. **Compile.** A small Windows helper (`compiler/shadercompile.cpp`) runs under the game's own
+   Proton and creates a D3D11 shader for each one. DXVK translates each shader to Vulkan and, through
+   `VK_EXT_graphics_pipeline_library`, compiles it right away. That's the same work the game triggers
+   when it loads a shader, so the GPU driver stores byte-identical results in its disk cache.
+3. **Install.**
+   - **NVIDIA:** under Proton the game never reads a cache file another process wrote, so the
+     finished cache is saved as `shader_precache.{bin,toc}` and added to the driver's read-only list
+     (`__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME`). The app also raises
+     `__GL_SHADER_DISK_CACHE_SIZE`, because NVIDIA's default limit is far too small and is enforced
+     even with `SKIP_CLEANUP`.
+   - **Mesa:** the cache is shared between processes, so the app compiles straight into the folder
+     Steam gives the game and raises `MESA_SHADER_CACHE_MAX_SIZE`.
+4. **Optional: Steam recordings.** Replays the pipelines Steam recorded (your sessions plus Valve's
+   community database) with Steam's own `fossilize_replay`. Everything already installed is attached
+   read-only, so only missing pipelines are compiled, into separate `shader_precache_rN` files.
+
+### Does it really match what the game compiles?
+
+**Check against my play sessions** replays your own recorded Overwatch sessions and asks the driver to
+return only pipelines it already has compiled (`VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED`).
+On the development machine:
+
+| Recorded per-shader compiles | Found in the precompiled cache |
+|---|---|
+| 3,590 | 3,590 (100.0%) |
+
+The game also builds "linked" pipelines from those compiled shaders. Linking pre-built pieces takes well
+under a millisecond, and DXVK builds the fully optimized versions in the background.
+
+## Limitations
+
+- **New Overwatch patches.** Reading the game files needs a TACTLib key file for each game build. After
+  a patch the app shows a "build not supported yet" message until the tool is rebuilt with an updated
+  TACTLib (bump `TACTLIB_COMMIT` in `fetch-deps.sh`).
+- **DX11 only.** The default Proton/DXVK path is covered. Overwatch's optional DX12 mode (vkd3d-proton) isn't.
+- A new graphics driver throws away all compiled shaders. Just run the app again.
+
+## Building from source
+
+Needs the .NET 10 SDK, `mingw64-gcc-c++` (or your distro's `x86_64-w64-mingw32-g++`) and git.
+
+```sh
+./build.sh          # fetches pinned OWLib/TACTLib, builds dist/ow-shader-precache
+```
+
+Other tools in the repo:
+- `extractor/`: command-line shader extractor (`ShaderDump <overwatch dir> <out dir> [--limit N]`).
+- `tests/match-test`: compiles extracted shaders into a scratch cache and measures how much of your
+  recorded sessions it covers.
+- `tests/LaunchOptionsTest`: checks the Steam launch-options editor against a copy of `localconfig.vdf`.
+
+## Disclaimer
+
+Not affiliated with or endorsed by Blizzard Entertainment or Valve. Overwatch is a trademark of
+Blizzard Entertainment. The app only reads the game files already installed on your PC, never touches
+the running game, and doesn't redistribute any game files. Use at your own risk.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Bundled third-party components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

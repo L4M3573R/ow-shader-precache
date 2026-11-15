@@ -1,0 +1,6 @@
+bin/
+obj/
+dist/
+third_party/
+compiler/*.exe
+*.log

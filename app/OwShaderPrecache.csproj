@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>ow-shader-precache</AssemblyName>
+    <RootNamespace>OwShaderPrecache</RootNamespace>
+    <Version>1.0.0</Version>
+    <!-- single self-contained executable; no .NET install needed on the target -->
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.23" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../third_party/OWLib/TankLib/TankLib.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the D3D11 shader feeder that runs under Proton; extracted at runtime -->
+    <EmbeddedResource Include="../compiler/shadercompile.exe" LogicalName="shadercompile.exe" />
+    <!-- TACTLib decryption keys; written next to the cache at runtime -->
+    <EmbeddedResource Include="../third_party/OWLib/TankLib/Overwatch.keyring" LogicalName="Overwatch.keyring" />
+  </ItemGroup>
+</Project>
