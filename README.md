@@ -104,6 +104,7 @@ Other tools in the repo:
 - `tests/match-test`: compiles extracted shaders into a scratch cache and measures how much of your
   recorded sessions it covers.
 - `tests/LaunchOptionsTest`: checks the Steam launch-options editor against a copy of `localconfig.vdf`.
+- `tests/CacheSetupTest`: checks installing and recovering NVIDIA cache files on a fake cache folder.
 
 ## Disclaimer
 

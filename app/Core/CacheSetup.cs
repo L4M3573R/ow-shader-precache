@@ -140,11 +140,12 @@ public static class CacheSetup {
                              .Select(f => new FileInfo(f)).OrderByDescending(f => f.Length).ToList();
         if (frags.Count == 0) return null;
         var best = frags[0];
+        long size = best.Length; // read before the move (LINQ never touched it when there was one file)
         var dir = best.DirectoryName!;
         var toc = Path.ChangeExtension(best.FullName, ".toc");
         File.Move(best.FullName, Path.Combine(dir, finalName + ".bin"), true);
         File.Move(toc, Path.Combine(dir, finalName + ".toc"), true);
         DeleteWork(g, workName);
-        return (Path.Combine(dir, finalName + ".bin"), best.Length);
+        return (Path.Combine(dir, finalName + ".bin"), size);
     }
 }
