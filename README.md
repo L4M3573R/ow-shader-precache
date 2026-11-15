@@ -18,7 +18,9 @@ the compiled result in the shader cache the game loads at launch.
 5. Click **Precompile shaders** and wait. On a 16-thread CPU, the game files take about 15 minutes.
    The optional Steam-recordings step adds more time.
 6. **Exit Steam completely** (tray icon → Exit), then click **Write Steam launch options**.
-   Without this step the game won't load the precompiled cache on NVIDIA.
+   Without this step the game won't load the precompiled cache on NVIDIA. On NVIDIA this also turns
+   off Steam's Shader Pre-Caching, so Steam stops "Processing Vulkan shaders" before every launch
+   (see [Steam's Shader Pre-Caching](#steams-shader-pre-caching)).
 7. Start Steam and play.
 
 Run it again after every Overwatch patch or graphics driver update. The app tells you when the cache is out of date.
@@ -59,8 +61,11 @@ uses Mesa mode.
      (`__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME`). The app also raises
      `__GL_SHADER_DISK_CACHE_SIZE`, because NVIDIA's default limit is far too small and is enforced
      even with `SKIP_CLEANUP`.
-   - **Mesa:** the cache is shared between processes, so the app compiles straight into the folder
-     Steam gives the game and raises `MESA_SHADER_CACHE_MAX_SIZE`.
+   - **Mesa:** the cache is shared between processes, so the app compiles straight into the game's
+     Steam shader-cache folder and raises `MESA_SHADER_CACHE_MAX_SIZE`.
+   - Either way, the launch options set the cache folder themselves (`__GL_SHADER_DISK_CACHE_PATH` /
+     `MESA_SHADER_CACHE_DIR`). Steam only points the driver at that folder while its Shader
+     Pre-Caching is on, so the game finds the cache whether or not that setting is on.
 4. **Optional: Steam recordings.** Replays the pipelines Steam recorded (your sessions plus Valve's
    community database) with Steam's own `fossilize_replay`. Everything already installed is attached
    read-only, so only missing pipelines are compiled, into separate `shader_precache_rN` files.
@@ -82,6 +87,21 @@ On the development machine:
 
 The game also builds "linked" pipelines from those compiled shaders. Linking pre-built pieces takes well
 under a millisecond, and DXVK builds the fully optimized versions in the background.
+
+### Steam's Shader Pre-Caching
+
+Steam's "Processing Vulkan shaders" step replays the pipelines it recorded (your sessions plus Valve's
+database) before the game starts. It does this whenever there's anything new, which is after most play
+sessions. On NVIDIA, the app's cache already contains all of that (and every other shader in the game),
+so **Write Steam launch options** turns the setting off: Steam → Settings → Downloads → *Shader
+Pre-Caching* (`DisableShaderCache` and `EnableShaderBackgroundProcessing` in Steam's `config/config.vdf`;
+a backup is saved next to it).
+
+- It's a Steam-wide setting, so it applies to your other games too. Turn it back on in Steam's settings
+  if you want it for them; the game still finds the precompiled cache either way.
+- With it off, Steam stops recording new sessions and downloading Valve's database, so the optional
+  Steam-recordings step only has the recordings you already have. The game-files step doesn't need them.
+- On Mesa (AMD/Intel/NVK) the setting is left alone.
 
 ## Limitations
 

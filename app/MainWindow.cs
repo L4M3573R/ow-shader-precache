@@ -214,9 +214,10 @@ public sealed class MainWindow : Window {
         else if (state.DriverId != drv || state.Mode != Mode.ToString()) s = "The graphics driver changed since the last compile. Compile again.";
         else s = $"Up to date: {state.ShadersCompiled:N0} shaders compiled on {state.CompiledAt:g} for build {build}.";
         var lo = LaunchOptions.Current(game.SteamRoot);
-        bool applied = lo != null && (Mode == CacheMode.NvidiaProprietary
-            ? lo.Contains(CacheSetup.GameReadOnlyList()) : lo.Contains("MESA_SHADER_CACHE_MAX_SIZE"));
-        s += applied ? "  Steam launch options: set." : "  Steam launch options: NOT set yet (needed so the game uses the cache).";
+        s += LaunchOptions.IsApplied(lo, game, Mode) ? "  Steam launch options: set."
+            : lo != null && lo.Contains(Mode == CacheMode.NvidiaProprietary ? "__GL_SHADER_DISK_CACHE" : "MESA_SHADER_CACHE")
+                ? "  Steam launch options: out of date (click \"Write Steam launch options\" again)."
+                : "  Steam launch options: NOT set yet (needed so the game uses the cache).";
         statusText.Text = s;
     }
 
@@ -405,8 +406,7 @@ public sealed class MainWindow : Window {
 
             Step("Done", 1);
             Log("Done.");
-            var lo = LaunchOptions.Current(g.SteamRoot) ?? "";
-            if (!lo.Contains(nvidia ? CacheSetup.GameReadOnlyList() : "MESA_SHADER_CACHE_MAX_SIZE"))
+            if (!LaunchOptions.IsApplied(LaunchOptions.Current(g.SteamRoot), g, mode))
                 Log("NEXT: exit Steam completely, then click \"Write Steam launch options\" so the game uses the cache.");
         }, ct);
     }
@@ -512,11 +512,16 @@ public sealed class MainWindow : Window {
     }
 
     async Task WriteLaunchOptionsAsync(GameInstall g, CancellationToken ct) {
-        var assignments = LaunchOptions.Assignments(Mode, CacheGiB);
+        var assignments = LaunchOptions.Assignments(g, Mode, CacheGiB);
         await Task.Run(() => {
             foreach (var line in LaunchOptions.Apply(g.SteamRoot, assignments))
                 Log("Launch options written: " + line);
-            Log("A backup of the Steam config was saved next to it (.bak-…). You can start Steam again.");
+            if (Mode == CacheMode.NvidiaProprietary)
+                Log(LaunchOptions.DisableSteamShaderPreCaching(g.SteamRoot)
+                    ? "Turned off Steam's Shader Pre-Caching (Settings → Downloads): the precompiled cache already has " +
+                      "what Steam would process before each launch. This applies to all Steam games; turn it back on there if you want."
+                    : "Steam's Shader Pre-Caching is already off.");
+            Log("A backup of each changed Steam config was saved next to it (.bak-…). You can start Steam again.");
             Step("Launch options written", 1);
         }, ct);
     }

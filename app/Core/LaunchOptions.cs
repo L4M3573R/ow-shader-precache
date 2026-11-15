@@ -8,14 +8,34 @@ namespace OwShaderPrecache.Core;
 /// closed, otherwise it overwrites the file on exit.</summary>
 public static class LaunchOptions {
     static readonly string[] OurVars = {
+        "__GL_SHADER_DISK_CACHE", "__GL_SHADER_DISK_CACHE_PATH",
         "__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME", "__GL_SHADER_DISK_CACHE_SIZE",
-        "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "MESA_SHADER_CACHE_MAX_SIZE",
+        "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "MESA_SHADER_CACHE_DIR", "MESA_SHADER_CACHE_MAX_SIZE",
     };
 
-    public static string Assignments(CacheMode mode, int gib) => mode == CacheMode.NvidiaProprietary
-        ? $"__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME=\"{CacheSetup.GameReadOnlyList()}\" " +
+    /// <summary>The cache folder is set explicitly, so the game finds the
+    /// precompiled cache even with Steam's Shader Pre-Caching turned off
+    /// (Steam only points the driver at its shadercache folder while it's on).</summary>
+    public static string Assignments(GameInstall g, CacheMode mode, int gib) => mode == CacheMode.NvidiaProprietary
+        ? $"__GL_SHADER_DISK_CACHE=1 __GL_SHADER_DISK_CACHE_PATH={Quote(g.NvidiaCacheDir)} " +
+          $"__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME={Quote(CacheSetup.GameReadOnlyList())} " +
           $"__GL_SHADER_DISK_CACHE_SIZE={CacheSetup.CacheBytes(gib)} __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1"
-        : $"MESA_SHADER_CACHE_MAX_SIZE={gib}G";
+        : $"MESA_SHADER_CACHE_DIR={Quote(g.ShaderCacheDir)} MESA_SHADER_CACHE_MAX_SIZE={gib}G";
+
+    /// <summary>True when the launch options hold what the current version
+    /// writes (older versions didn't set the cache folder).</summary>
+    public static bool IsApplied(string? launchOptions, GameInstall g, CacheMode mode) {
+        if (launchOptions == null) return false;
+        var need = mode == CacheMode.NvidiaProprietary
+            ? new[] { $"__GL_SHADER_DISK_CACHE_PATH={Quote(g.NvidiaCacheDir)}",
+                      $"__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME={Quote(CacheSetup.GameReadOnlyList())}" }
+            : new[] { $"MESA_SHADER_CACHE_DIR={Quote(g.ShaderCacheDir)}", "MESA_SHADER_CACHE_MAX_SIZE=" };
+        return need.All(launchOptions.Contains);
+    }
+
+    /// <summary>Double-quote a value for the shell that runs the launch options.</summary>
+    static string Quote(string v) =>
+        "\"" + Regex.Replace(v, @"[""\\$`]", m => "\\" + m.Value) + "\"";
 
     /// <summary>Merge our variables into existing launch options.</summary>
     public static string Merge(string existing, string assignments) {
@@ -58,19 +78,9 @@ public static class LaunchOptions {
             if (app == null) continue;
             var (open, close) = app.Value;
             var lo = FindKey(text, open, close, "LaunchOptions");
-            string updated;
-            string merged;
-            if (lo != null) {
-                merged = Merge(Unescape(text[lo.Value.valStart..lo.Value.valEnd]), assignments);
-                updated = text[..lo.Value.valStart] + Escape(merged) + text[lo.Value.valEnd..];
-            } else {
-                merged = Merge("", assignments);
-                // insert a new key on its own line before the block's closing brace
-                int lineStart = text.LastIndexOf('\n', close) + 1;
-                string indent = text[lineStart..close] + "\t";
-                updated = text[..lineStart] + $"{indent}\"LaunchOptions\"\t\t\"{Escape(merged)}\"\n" + text[lineStart..];
-            }
-            File.Copy(f, f + $".bak-{DateTime.Now:yyyyMMdd-HHmmss}", false);
+            var merged = Merge(lo == null ? "" : Unescape(text[lo.Value.valStart..lo.Value.valEnd]), assignments);
+            var updated = SetKey(text, open, close, "LaunchOptions", merged);
+            Backup(f);
             File.WriteAllText(f, updated);
             changed.Add($"{f}: {merged}");
         }
@@ -78,6 +88,50 @@ public static class LaunchOptions {
             throw new InvalidOperationException("Overwatch wasn't found in any Steam user's config. Launch the game once from Steam first.");
         return changed;
     }
+
+    /// <summary>Turn off Steam's Shader Pre-Caching (Settings → Downloads),
+    /// for NVIDIA: the precompiled cache already holds everything Steam would
+    /// process before a launch. This is a Steam-wide setting
+    /// (config/config.vdf → ShaderCacheManager). Steam must be closed.
+    /// Returns false when it was already off.</summary>
+    public static bool DisableSteamShaderPreCaching(string steamRoot, bool skipSteamCheck = false) {
+        if (!skipSteamCheck && Steam.IsRunning())
+            throw new InvalidOperationException("Steam is running. Exit Steam completely (tray icon → Exit) and try again.");
+        var f = Path.Combine(steamRoot, "config", "config.vdf");
+        if (!File.Exists(f)) throw new InvalidOperationException($"Steam's settings file wasn't found: {f}");
+        var onDisk = File.ReadAllText(f);
+        var text = onDisk;
+        var steam = FindPath(text, "InstallConfigStore", "Software", "Valve", "Steam")
+            ?? throw new InvalidOperationException($"Unexpected layout in {f}.");
+        var scm = FindBlock(text, steam.open + 1, steam.close, "ShaderCacheManager");
+        if (scm == null) {
+            int lineStart = text.LastIndexOf('\n', steam.close) + 1;
+            string indent = text[lineStart..steam.close] + "\t";
+            text = text[..lineStart] + $"{indent}\"ShaderCacheManager\"\n{indent}{{\n{indent}}}\n" + text[lineStart..];
+        }
+        foreach (var (key, val) in new[] { ("DisableShaderCache", "1"), ("EnableShaderBackgroundProcessing", "0") }) {
+            var b = FindPath(text, "InstallConfigStore", "Software", "Valve", "Steam", "ShaderCacheManager")!.Value;
+            var cur = FindKey(text, b.open, b.close, key);
+            if (cur != null && text[cur.Value.valStart..cur.Value.valEnd] == val) continue;
+            text = SetKey(text, b.open, b.close, key, val);
+        }
+        if (text == onDisk) return false;
+        Backup(f);
+        File.WriteAllText(f, text);
+        return true;
+    }
+
+    /// <summary>Set key's value inside the block [open, close], adding it if missing.</summary>
+    static string SetKey(string text, int open, int close, string key, string value) {
+        var k = FindKey(text, open, close, key);
+        if (k != null) return text[..k.Value.valStart] + Escape(value) + text[k.Value.valEnd..];
+        // insert a new key on its own line before the block's closing brace
+        int lineStart = text.LastIndexOf('\n', close) + 1;
+        string indent = text[lineStart..close] + "\t";
+        return text[..lineStart] + $"{indent}\"{key}\"\t\t\"{Escape(value)}\"\n" + text[lineStart..];
+    }
+
+    static void Backup(string f) => File.Copy(f, f + $".bak-{DateTime.Now:yyyyMMdd-HHmmss}", false);
 
     static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
     static string Unescape(string s) => Regex.Replace(s, @"\\(.)", "$1");
@@ -131,14 +185,17 @@ public static class LaunchOptions {
         return null;
     }
 
-    static (int open, int close)? FindAppBlock(string s) {
+    static (int open, int close)? FindPath(string s, params string[] keys) {
         (int open, int close)? cur = (-1, s.Length);
-        foreach (var key in new[] { "UserLocalConfigStore", "Software", "Valve", "Steam", "apps", Steam.AppId }) {
+        foreach (var key in keys) {
             cur = FindBlock(s, cur!.Value.open + 1, cur.Value.close, key);
             if (cur == null) return null;
         }
         return cur;
     }
+
+    static (int open, int close)? FindAppBlock(string s) =>
+        FindPath(s, "UserLocalConfigStore", "Software", "Valve", "Steam", "apps", Steam.AppId);
 
     static (int valStart, int valEnd)? FindKey(string s, int open, int close, string key) {
         int depth = 0;
